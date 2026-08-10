@@ -112,20 +112,117 @@ func (l *WebviewLocalStorageLogin) Start(ctx context.Context) (*bridgev2.LoginSt
   const traceValue = () => trace.join(" | ");
   addTrace("start url=" + location.href);
 
-  // Force fallback auth path before passkey/WebAuthn prompts.
-  try {
-    Object.defineProperty(Navigator.prototype, "credentials", {
-      get() {
-        return {
-          get: async () => {
-            throw new DOMException("User cancelled", "NotAllowedError");
-          }
-        };
+  // The Beeper webview can't display passkey/WebAuthn prompts. Preserve the
+  // original workaround exactly: a non-configurable prototype getter that
+  // exposes only a rejecting get(). Microsoft then falls back to password/OTP.
+  // Keeping this descriptor non-configurable prevents page scripts from
+  // restoring the native CredentialContainer after the extractor is injected.
+  if (globalThis.__mautrixTeamsWebAuthnBlocked) {
+    addTrace("webauthn_override=already_installed");
+  } else {
+    try {
+      Object.defineProperty(Navigator.prototype, "credentials", {
+        get() {
+          return {
+            get: async () => {
+              throw new DOMException("User cancelled", "NotAllowedError");
+            }
+          };
+        }
+      });
+      globalThis.__mautrixTeamsWebAuthnBlocked = true;
+      addTrace("webauthn_override=ok");
+      console.log("[BrowserAuth] mautrix-teams WebAuthn blocker installed url=" + location.href);
+    } catch (e) {
+      addTrace("webauthn_override=failed:" + String((e && e.message) || e));
+      console.log("[BrowserAuth] mautrix-teams WebAuthn blocker failed url=" + location.href);
+    }
+  }
+
+  const clickedFallbackControls = new WeakSet();
+  function elementLabel(element) {
+    return String(
+      element?.innerText ||
+      element?.textContent ||
+      element?.getAttribute?.("aria-label") ||
+      element?.getAttribute?.("title") ||
+      element?.value ||
+      ""
+    ).replace(/\s+/g, " ").trim();
+  }
+  function isVisibleControl(element) {
+    if (!element || element.disabled || clickedFallbackControls.has(element)) return false;
+    try {
+      const style = getComputedStyle(element);
+      return style.display !== "none" && style.visibility !== "hidden" && element.getClientRects().length > 0;
+    } catch (e) {
+      return false;
+    }
+  }
+  function clickFallbackControl(element, reason) {
+    if (!isVisibleControl(element)) return false;
+    clickedFallbackControls.add(element);
+    addTrace("auth_fallback_click=" + reason + ":" + elementLabel(element).slice(0, 80));
+    element.click();
+    return true;
+  }
+  function firstVisible(selectors) {
+    for (const selector of selectors) {
+      let elements = [];
+      try { elements = document.querySelectorAll(selector); } catch (e) { continue; }
+      for (const element of elements) {
+        if (isVisibleControl(element)) return element;
       }
-    });
-    addTrace("webauthn_override=ok");
-  } catch (e) {
-    addTrace("webauthn_override=failed:" + String((e && e.message) || e));
+    }
+    return null;
+  }
+  function findControlByText(pattern) {
+    for (const element of document.querySelectorAll('button, a, [role="button"], input[type="button"], input[type="submit"]')) {
+      if (isVisibleControl(element) && pattern.test(elementLabel(element))) return element;
+    }
+    return null;
+  }
+  function forceNonPasskeyAuth() {
+    if (!/(^|\.)(live\.com|microsoftonline\.com)$/i.test(location.hostname)) return;
+
+    const passwordControl = firstVisible([
+      "#idA_PWD_SwitchToPassword",
+      '[data-bind*="SwitchToPassword"]',
+      'button[data-testid*="password" i]',
+      'a[data-testid*="password" i]',
+      '[role="button"][data-testid*="password" i]',
+      '[role="button"][data-value="Password" i]'
+    ]) || findControlByText(/^(?:use (?:(?:your|my) )?password(?: instead)?|sign in with (?:your )?password|password)[.!…]?$/i);
+    if (passwordControl && clickFallbackControl(passwordControl, "password")) return;
+
+    const pageText = String(document.body?.innerText || document.body?.textContent || "");
+    if (!/(?:passkey|security key|windows hello|face, fingerprint|scan (?:the |a )?qr)/i.test(pageText)) return;
+
+    const otherWaysControl = firstVisible([
+      "#idA_PWD_SwitchToCredPicker",
+      "#signInAnotherWay",
+      '[data-bind*="SwitchToCredPicker"]',
+      '[data-testid*="another-way" i]',
+      '[data-testid*="signin-options" i]'
+    ]) || findControlByText(/^(?:other ways to sign in|sign-in options|(?:use|choose) another (?:way|method)(?: to sign in)?|more choices|i (?:can't|cannot) use my passkey)[.!…]?$/i);
+    if (otherWaysControl && clickFallbackControl(otherWaysControl, "other_ways")) return;
+
+    // Once Microsoft reaches the active passkey verification screen, the only
+    // available escape hatch is the back arrow. Cancel that screen first; the
+    // next polling iteration can then choose password or another OTP method.
+    if (/(?:signing in with your passkey|opening a security window|verifying)/i.test(pageText)) {
+      const backControl = firstVisible([
+        "#idBtn_Back",
+        'button[aria-label="Back" i]',
+        '[role="button"][aria-label="Back" i]',
+        'button[title="Back" i]',
+        '[role="button"][title="Back" i]',
+        'button[data-testid*="back" i]',
+        '[role="button"][data-testid*="back" i]',
+        ".backButton"
+      ]) || findControlByText(/^(?:back|go back|previous)[.!…]?$/i);
+      clickFallbackControl(backControl, "cancel_passkey");
+    }
   }
 
   function dump() {
@@ -150,41 +247,76 @@ func (l *WebviewLocalStorageLogin) Start(ctx context.Context) (*bridgev2.LoginSt
     try { localStorage.setItem(key, value); return true; } catch (e) { return false; }
   }
   function findAuthCacheKey() {
-    let teamsTokenKey = "";
-    let teamsEncryptionKeyFound = false;
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (!k) continue;
-      if (k.startsWith("msal.token.keys.")) return k;
-      if (k.startsWith("msal.") && k.includes(".token.keys.")) return k;
-      if (k.startsWith("tmp.auth.v1.") && k.endsWith(".Discover.SKYPE-TOKEN")) teamsTokenKey = k;
-      if (k.endsWith(".ExportedEncryptionKey.ExportedEncryptionKey")) teamsEncryptionKeyFound = true;
-    }
-    return teamsTokenKey && teamsEncryptionKeyFound ? teamsTokenKey : "";
-  }
-  for (let i = 0; i < 1200; i++) { // ~2 minutes
-    if (i % 50 === 0) {
-      addTrace("poll i=" + i + " ls_len=" + localStorage.length + " url=" + location.href);
-    }
-    const key = findAuthCacheKey();
-    if (key) {
-      addTrace("auth_cache_key_found=" + key);
-      const storage = dump();
-      addTrace("dump_len=" + storage.length);
-      if (storage) {
-        const debug = traceValue();
-        const storageSaved = trySet("__mautrix_teams_full_storage", storage);
-        const debugSaved = trySet("__mautrix_teams_debug", debug);
-        addTrace("stash_storage=" + (storageSaved ? "ok" : "fail") + " stash_debug=" + (debugSaved ? "ok" : "fail"));
-        return { storage, debug };
+    try {
+      let teamsTokenKey = "";
+      let teamsEncryptionKeyFound = false;
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (!k) continue;
+        if (k.startsWith("msal.token.keys.")) return k;
+        if (k.startsWith("msal.") && k.includes(".token.keys.")) return k;
+        if (k.startsWith("tmp.auth.v1.") && k.endsWith(".Discover.SKYPE-TOKEN")) teamsTokenKey = k;
+        if (k.endsWith(".ExportedEncryptionKey.ExportedEncryptionKey")) teamsEncryptionKeyFound = true;
       }
-      addTrace("dump_empty");
+      return teamsTokenKey && teamsEncryptionKeyFound ? teamsTokenKey : "";
+    } catch (e) {
+      addTrace("auth_cache_scan=failed:" + String((e && e.message) || e));
+      return "";
     }
-    await new Promise(r => setTimeout(r, 100));
   }
-  const finalDump = dump();
-  addTrace("timeout final_dump_len=" + finalDump.length + " url=" + location.href);
-  return { storage: finalDump || "{}", debug: traceValue() };
+  function captureAuthResult() {
+    forceNonPasskeyAuth();
+    const key = findAuthCacheKey();
+    if (!key) return null;
+
+    addTrace("auth_cache_key_found=" + key);
+    const storage = dump();
+    addTrace("dump_len=" + storage.length);
+    if (!storage) {
+      addTrace("dump_empty");
+      return null;
+    }
+
+    const debug = traceValue();
+    const storageSaved = trySet("__mautrix_teams_full_storage", storage);
+    const debugSaved = trySet("__mautrix_teams_debug", debug);
+    addTrace("stash_storage=" + (storageSaved ? "ok" : "fail") + " stash_debug=" + (debugSaved ? "ok" : "fail"));
+    const result = { storage, debug };
+
+    // Beeper reads this global every 100 ms while the browser is open. Publish
+    // from the background watcher so ExtractJS itself can return immediately;
+    // Beeper otherwise waits for it before registering navigation listeners.
+    globalThis.__BEEP_BEEP_AUTH_RESULTS__ = result;
+    return result;
+  }
+
+  const immediateResult = captureAuthResult();
+  if (immediateResult) return immediateResult;
+
+  if (!globalThis.__mautrixTeamsLoginPoller) {
+    let pollCount = 0;
+    globalThis.__mautrixTeamsLoginPoller = setInterval(() => {
+      pollCount++;
+      if (pollCount % 50 === 0) {
+        let storageLength = -1;
+        try { storageLength = localStorage.length; } catch (e) {}
+        addTrace("poll i=" + pollCount + " ls_len=" + storageLength + " url=" + location.href);
+      }
+      const result = captureAuthResult();
+      if (result) {
+        clearInterval(globalThis.__mautrixTeamsLoginPoller);
+        globalThis.__mautrixTeamsLoginPoller = undefined;
+      }
+    }, 100);
+    addTrace("background_poller=started");
+  } else {
+    addTrace("background_poller=already_started");
+  }
+
+  // Returning promptly is required: Beeper attaches runJSOnNavigate only
+  // after this promise resolves. The background poller publishes the eventual
+  // token result through __BEEP_BEEP_AUTH_RESULTS__.
+  return {};
 })()`,
 		},
 	}, nil

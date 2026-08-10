@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"go.mau.fi/mautrix-teams/internal/teams/auth"
 	"go.mau.fi/mautrix-teams/pkg/teamsid"
@@ -29,7 +30,11 @@ func ExtractTeamsLoginMetadataFromLocalStorage(ctx context.Context, rawStorage, 
 		authClient.ClientID = id
 	}
 	accessToken := strings.TrimSpace(state.AccessToken)
-	if accessToken == "" {
+	directSkypeToken := strings.TrimSpace(state.SkypeToken)
+	directTeamsUserID := auth.NormalizeTeamsUserID(state.TeamsUserID)
+	useDirectSkypeToken := directSkypeToken != "" && directTeamsUserID != "" &&
+		time.Now().UTC().Add(auth.SkypeTokenExpirySkew).Before(time.Unix(state.SkypeTokenExpiresAt, 0).UTC())
+	if !useDirectSkypeToken && accessToken == "" {
 		refreshToken := strings.TrimSpace(state.RefreshToken)
 		if refreshToken == "" {
 			return nil, bridgev2.RespError{ErrCode: "FI.MAU.TEAMS_MISSING_ACCESS_TOKEN", Err: "Access token missing from extracted state", StatusCode: http.StatusBadRequest}
@@ -69,12 +74,18 @@ func ExtractTeamsLoginMetadataFromLocalStorage(ctx context.Context, rawStorage, 
 		}
 	}
 
-	token, expiresAt, skypeID, err := authClient.AcquireSkypeToken(ctx, accessToken)
-	if err != nil {
-		return nil, bridgev2.RespError{ErrCode: "FI.MAU.TEAMS_SKYPETOKEN_FAILED", Err: fmt.Sprintf("Failed to acquire skypetoken: %v", err), StatusCode: http.StatusBadRequest}
+	token := directSkypeToken
+	expiresAt := state.SkypeTokenExpiresAt
+	teamsUserID := directTeamsUserID
+	if !useDirectSkypeToken {
+		var skypeID string
+		token, expiresAt, skypeID, err = authClient.AcquireSkypeToken(ctx, accessToken)
+		if err != nil {
+			return nil, bridgev2.RespError{ErrCode: "FI.MAU.TEAMS_SKYPETOKEN_FAILED", Err: fmt.Sprintf("Failed to acquire skypetoken: %v", err), StatusCode: http.StatusBadRequest}
+		}
+		teamsUserID = auth.NormalizeTeamsUserID(skypeID)
 	}
 
-	teamsUserID := auth.NormalizeTeamsUserID(skypeID)
 	if teamsUserID == "" {
 		return nil, bridgev2.RespError{ErrCode: "FI.MAU.TEAMS_MISSING_USER_ID", Err: "Teams user ID missing from skypetoken response", StatusCode: http.StatusBadRequest}
 	}

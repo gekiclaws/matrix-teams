@@ -129,27 +129,46 @@ func (l *WebviewLocalStorageLogin) Start(ctx context.Context) (*bridgev2.LoginSt
   }
 
   function dump() {
-    try { return JSON.stringify(Object.fromEntries(Object.entries(localStorage))); } catch (e) { return ""; }
+    try {
+      const storage = Object.fromEntries(
+        Object.entries(localStorage).filter(([key]) => !key.startsWith("__mautrix_teams_"))
+      );
+      const cookiePrefix = "msal.cache.encryption=";
+      const encryptionCookie = document.cookie.split(";").map(value => value.trim()).find(value => value.startsWith(cookiePrefix));
+      if (encryptionCookie) {
+        const cookieValue = encryptionCookie.slice(cookiePrefix.length);
+        try {
+          storage["__mautrix_teams_msal_cache_encryption"] = decodeURIComponent(cookieValue);
+        } catch (e) {
+          storage["__mautrix_teams_msal_cache_encryption"] = cookieValue;
+        }
+      }
+      return JSON.stringify(storage);
+    } catch (e) { return ""; }
   }
   function trySet(key, value) {
     try { localStorage.setItem(key, value); return true; } catch (e) { return false; }
   }
-  function findMSALKey() {
+  function findAuthCacheKey() {
+    let teamsTokenKey = "";
+    let teamsEncryptionKeyFound = false;
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
       if (!k) continue;
       if (k.startsWith("msal.token.keys.")) return k;
       if (k.startsWith("msal.") && k.includes(".token.keys.")) return k;
+      if (k.startsWith("tmp.auth.v1.") && k.endsWith(".Discover.SKYPE-TOKEN")) teamsTokenKey = k;
+      if (k.endsWith(".ExportedEncryptionKey.ExportedEncryptionKey")) teamsEncryptionKeyFound = true;
     }
-    return "";
+    return teamsTokenKey && teamsEncryptionKeyFound ? teamsTokenKey : "";
   }
   for (let i = 0; i < 1200; i++) { // ~2 minutes
     if (i % 50 === 0) {
       addTrace("poll i=" + i + " ls_len=" + localStorage.length + " url=" + location.href);
     }
-    const key = findMSALKey();
+    const key = findAuthCacheKey();
     if (key) {
-      addTrace("msal_key_found=" + key);
+      addTrace("auth_cache_key_found=" + key);
       const storage = dump();
       addTrace("dump_len=" + storage.length);
       if (storage) {

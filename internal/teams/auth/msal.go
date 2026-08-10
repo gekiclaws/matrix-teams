@@ -1,8 +1,14 @@
 package auth
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/hkdf"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -20,11 +26,38 @@ type msalTokenEntry struct {
 	Target    string `json:"target"`
 }
 
+// extractedMSALEncryptionCookieKey is added to the copied storage payload by
+// the webview script. MSAL keeps this session key in a cookie, not localStorage.
+const extractedMSALEncryptionCookieKey = "__mautrix_teams_msal_cache_encryption"
+
 func ExtractTokensFromMSALLocalStorage(raw string, clientID string) (*AuthState, error) {
 	storage, err := parseStorage(raw)
 	if err != nil {
 		return nil, err
 	}
+	clientID = resolveMSALClientID(storage, clientID)
+
+	state := &AuthState{}
+	var extractionErrors []error
+	if msalState, msalErr := extractMSALTokens(storage, clientID); msalErr == nil {
+		mergeAuthState(state, msalState)
+	} else {
+		extractionErrors = append(extractionErrors, msalErr)
+	}
+	if teamsState, teamsErr := extractTeamsAuthTokens(storage); teamsErr == nil {
+		mergeAuthState(state, teamsState)
+	} else {
+		extractionErrors = append(extractionErrors, teamsErr)
+	}
+
+	if state.RefreshToken == "" && state.AccessToken == "" && state.SkypeToken == "" {
+		return nil, fmt.Errorf("no usable Teams authentication tokens found: %w", errors.Join(extractionErrors...))
+	}
+	return state, nil
+}
+
+func extractMSALTokens(storage map[string]string, clientID string) (*AuthState, error) {
+	cacheKey := extractMSALEncryptionKey(storage)
 	keysEntry, err := findMSALKeys(storage, clientID)
 	if err != nil {
 		return nil, err
@@ -38,14 +71,9 @@ func ExtractTokensFromMSALLocalStorage(raw string, clientID string) (*AuthState,
 		return nil, errors.New("no refresh token keys in msal token keys")
 	}
 
-	refreshEntry, ok := storage[keys.RefreshToken[0]]
-	if !ok {
-		return nil, errors.New("refresh token entry not found in localStorage")
-	}
-
-	var refresh msalTokenEntry
-	if err := json.Unmarshal([]byte(refreshEntry), &refresh); err != nil {
-		return nil, err
+	refresh, err := readMSALEntry(storage, keys.RefreshToken[0], clientID, cacheKey)
+	if err != nil {
+		return nil, fmt.Errorf("refresh token entry: %w", err)
 	}
 	if refresh.Secret == "" {
 		return nil, errors.New("refresh token secret missing")
@@ -61,14 +89,14 @@ func ExtractTokensFromMSALLocalStorage(raw string, clientID string) (*AuthState,
 	}
 
 	if len(keys.AccessToken) > 0 {
-		accessToken, expiresAt := selectMBIAccessToken(storage, keys.AccessToken)
+		accessToken, expiresAt := selectMBIAccessToken(storage, keys.AccessToken, clientID, cacheKey)
 		if accessToken != "" {
 			state.AccessToken = accessToken
 			if expiresAt != 0 {
 				state.ExpiresAtUnix = expiresAt
 			}
 		}
-		graphAccessToken, graphExpiresAt := selectGraphAccessToken(storage, keys.AccessToken)
+		graphAccessToken, graphExpiresAt := selectGraphAccessToken(storage, keys.AccessToken, clientID, cacheKey)
 		if graphAccessToken != "" {
 			state.GraphAccessToken = graphAccessToken
 			if graphExpiresAt != 0 {
@@ -78,11 +106,8 @@ func ExtractTokensFromMSALLocalStorage(raw string, clientID string) (*AuthState,
 	}
 
 	if len(keys.IDToken) > 0 {
-		if idEntry, ok := storage[keys.IDToken[0]]; ok {
-			var idToken msalTokenEntry
-			if err := json.Unmarshal([]byte(idEntry), &idToken); err == nil {
-				state.IDToken = idToken.Secret
-			}
+		if idToken, err := readMSALEntry(storage, keys.IDToken[0], clientID, cacheKey); err == nil {
+			state.IDToken = idToken.Secret
 		}
 	}
 
@@ -91,16 +116,12 @@ func ExtractTokensFromMSALLocalStorage(raw string, clientID string) (*AuthState,
 
 const mbiAccessTokenMarker = "service::api.fl.spaces.skype.com::mbi_ssl"
 
-func selectMBIAccessToken(storage map[string]string, keys []string) (string, int64) {
+func selectMBIAccessToken(storage map[string]string, keys []string, clientID string, cacheKey *msalCacheEncryptionKey) (string, int64) {
 	var bestToken string
 	var bestExpiry int64
 	for _, key := range keys {
-		raw, ok := storage[key]
-		if !ok || raw == "" {
-			continue
-		}
-		var entry msalTokenEntry
-		if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+		entry, err := readMSALEntry(storage, key, clientID, cacheKey)
+		if err != nil {
 			continue
 		}
 		if entry.Secret == "" || !matchesMBITarget(entry.Target) {
@@ -123,16 +144,12 @@ func matchesMBITarget(target string) bool {
 	return strings.Contains(lower, mbiAccessTokenMarker)
 }
 
-func selectGraphAccessToken(storage map[string]string, keys []string) (string, int64) {
+func selectGraphAccessToken(storage map[string]string, keys []string, clientID string, cacheKey *msalCacheEncryptionKey) (string, int64) {
 	var bestToken string
 	var bestExpiry int64
 	for _, key := range keys {
-		raw, ok := storage[key]
-		if !ok || raw == "" {
-			continue
-		}
-		var entry msalTokenEntry
-		if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+		entry, err := readMSALEntry(storage, key, clientID, cacheKey)
+		if err != nil {
 			continue
 		}
 		if entry.Secret == "" || !matchesGraphTarget(entry.Target) {
@@ -221,4 +238,153 @@ func parseMSALExpires(value string) (int64, bool) {
 		return parsed.UTC().Unix(), true
 	}
 	return 0, false
+}
+
+type msalCacheEncryptionKey struct {
+	ID  string
+	Key []byte
+}
+
+type msalEncryptedEnvelope struct {
+	ID    string `json:"id"`
+	Nonce string `json:"nonce"`
+	Data  string `json:"data"`
+}
+
+func readMSALEntry(storage map[string]string, storageKey, clientID string, cacheKey *msalCacheEncryptionKey) (msalTokenEntry, error) {
+	raw, ok := storage[storageKey]
+	if !ok {
+		return msalTokenEntry{}, errors.New("not found in localStorage")
+	}
+	plain, err := decryptMSALEntryValue(cacheKey, storageKey, clientID, raw)
+	if err != nil {
+		return msalTokenEntry{}, err
+	}
+	var entry msalTokenEntry
+	if err := json.Unmarshal([]byte(plain), &entry); err != nil {
+		return msalTokenEntry{}, err
+	}
+	return entry, nil
+}
+
+// decryptMSALEntryValue mirrors @azure/msal-browser's encrypted localStorage
+// format: HKDF-SHA256 derives an AES-256-GCM key per entry, with a zero IV.
+func decryptMSALEntryValue(cacheKey *msalCacheEncryptionKey, storageKey, clientID, rawValue string) (string, error) {
+	var envelope msalEncryptedEnvelope
+	if err := json.Unmarshal([]byte(rawValue), &envelope); err != nil {
+		return rawValue, nil
+	}
+	if envelope.Data == "" || envelope.Nonce == "" {
+		return rawValue, nil
+	}
+	if cacheKey == nil || len(cacheKey.Key) == 0 {
+		return "", errors.New("entry is encrypted but the MSAL encryption cookie was not captured")
+	}
+	if envelope.ID != "" && cacheKey.ID != "" && envelope.ID != cacheKey.ID {
+		return "", errors.New("entry was encrypted with a different MSAL session key")
+	}
+	nonce, err := decodeAuthBase64(envelope.Nonce)
+	if err != nil {
+		return "", fmt.Errorf("decode nonce: %w", err)
+	}
+	ciphertext, err := decodeAuthBase64(envelope.Data)
+	if err != nil {
+		return "", fmt.Errorf("decode data: %w", err)
+	}
+	context := ""
+	if clientID != "" && strings.Contains(storageKey, clientID) {
+		context = clientID
+	}
+	derivedKey, err := hkdf.Key(sha256.New, cacheKey.Key, nonce, context, 32)
+	if err != nil {
+		return "", fmt.Errorf("derive key: %w", err)
+	}
+	block, err := aes.NewCipher(derivedKey)
+	if err != nil {
+		return "", fmt.Errorf("create AES cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("create AES-GCM cipher: %w", err)
+	}
+	plaintext, err := gcm.Open(nil, make([]byte, gcm.NonceSize()), ciphertext, nil)
+	if err != nil {
+		return "", fmt.Errorf("decrypt AES-GCM entry: %w", err)
+	}
+	return string(plaintext), nil
+}
+
+func extractMSALEncryptionKey(storage map[string]string) *msalCacheEncryptionKey {
+	raw := strings.TrimSpace(storage[extractedMSALEncryptionCookieKey])
+	if raw == "" {
+		return nil
+	}
+	var cookie struct {
+		ID  string `json:"id"`
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal([]byte(raw), &cookie); err != nil || cookie.Key == "" {
+		return nil
+	}
+	key, err := decodeAuthBase64(cookie.Key)
+	if err != nil {
+		return nil
+	}
+	return &msalCacheEncryptionKey{ID: cookie.ID, Key: key}
+}
+
+func resolveMSALClientID(storage map[string]string, clientID string) string {
+	if strings.TrimSpace(clientID) != "" {
+		return clientID
+	}
+	const marker = ".token.keys."
+	for key := range storage {
+		if i := strings.Index(key, marker); i != -1 {
+			return key[i+len(marker):]
+		}
+	}
+	return ""
+}
+
+func decodeAuthBase64(value string) ([]byte, error) {
+	value = strings.TrimSpace(value)
+	for _, encoding := range []*base64.Encoding{
+		base64.RawURLEncoding,
+		base64.StdEncoding,
+		base64.URLEncoding,
+		base64.RawStdEncoding,
+	} {
+		decoded, err := encoding.DecodeString(value)
+		if err == nil {
+			return decoded, nil
+		}
+	}
+	return nil, errors.New("invalid base64")
+}
+
+func mergeAuthState(destination, source *AuthState) {
+	if destination == nil || source == nil {
+		return
+	}
+	if destination.AccessToken == "" {
+		destination.AccessToken = source.AccessToken
+		destination.ExpiresAtUnix = source.ExpiresAtUnix
+	}
+	if destination.RefreshToken == "" {
+		destination.RefreshToken = source.RefreshToken
+	}
+	if destination.IDToken == "" {
+		destination.IDToken = source.IDToken
+	}
+	if destination.SkypeToken == "" {
+		destination.SkypeToken = source.SkypeToken
+		destination.SkypeTokenExpiresAt = source.SkypeTokenExpiresAt
+	}
+	if destination.GraphAccessToken == "" {
+		destination.GraphAccessToken = source.GraphAccessToken
+		destination.GraphExpiresAt = source.GraphExpiresAt
+	}
+	if destination.TeamsUserID == "" {
+		destination.TeamsUserID = source.TeamsUserID
+	}
 }

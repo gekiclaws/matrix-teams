@@ -2,10 +2,14 @@ package connector
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"go.mau.fi/mautrix-teams/internal/teams/auth"
 )
@@ -163,4 +167,76 @@ func TestExtractTeamsLoginMetadataFromLocalStorage_RefreshesGraphWhenMissingInSt
 	if meta.SkypeToken != "skype-token" {
 		t.Fatalf("unexpected skype token: %s", meta.SkypeToken)
 	}
+}
+
+func TestExtractTeamsLoginMetadataFromLocalStorage_UsesEncryptedCachedSkypeToken(t *testing.T) {
+	baseKey := []byte("0123456789abcdef0123456789abcdef")
+	expiresAt := time.Now().UTC().Add(10 * time.Minute).Unix()
+	storage := map[string]string{
+		"tmp.auth.v1.GLOBAL.ExportedEncryptionKey.ExportedEncryptionKey": marshalTestJSON(t, map[string]any{
+			"item": map[string]string{"exportedKey": base64.StdEncoding.EncodeToString(baseKey)},
+		}),
+		"tmp.auth.v1.live-user.Discover.SKYPE-TOKEN": encryptedTeamsAuthCacheValue(t, baseKey, "cached-skype-token", map[string]any{
+			"expiration":  expiresAt * 1000,
+			"userDetails": map[string]string{"id": "live:cached-user"},
+		}),
+	}
+
+	origFactory := newAuthClient
+	newAuthClient = func(store *auth.CookieStore) *auth.Client {
+		client := auth.NewClient(store)
+		client.SkypeTokenEndpoint = "http://127.0.0.1:1/should-not-be-called"
+		return client
+	}
+	defer func() {
+		newAuthClient = origFactory
+	}()
+
+	meta, err := ExtractTeamsLoginMetadataFromLocalStorage(context.Background(), marshalTestJSON(t, storage), auth.NewClient(nil).ClientID)
+	if err != nil {
+		t.Fatalf("unexpected extraction error: %v", err)
+	}
+	if meta.SkypeToken != "cached-skype-token" {
+		t.Fatalf("unexpected Skype token: %q", meta.SkypeToken)
+	}
+	if meta.SkypeTokenExpiresAt != expiresAt {
+		t.Fatalf("unexpected Skype token expiry: %d", meta.SkypeTokenExpiresAt)
+	}
+	if meta.TeamsUserID != "8:live:cached-user" {
+		t.Fatalf("unexpected Teams user ID: %q", meta.TeamsUserID)
+	}
+}
+
+func encryptedTeamsAuthCacheValue(t *testing.T, baseKey []byte, plaintext string, extra map[string]any) string {
+	t.Helper()
+	block, err := aes.NewCipher(baseKey)
+	if err != nil {
+		t.Fatalf("create test cipher: %v", err)
+	}
+	iv := []byte("0123456789abcdef")
+	padding := block.BlockSize() - len(plaintext)%block.BlockSize()
+	padded := make([]byte, len(plaintext)+padding)
+	copy(padded, plaintext)
+	for i := len(plaintext); i < len(padded); i++ {
+		padded[i] = byte(padding)
+	}
+	ciphertext := make([]byte, len(padded))
+	cipher.NewCBCEncrypter(block, iv).CryptBlocks(ciphertext, padded)
+	item := map[string]any{
+		"encryptedToken": base64.StdEncoding.EncodeToString(ciphertext),
+		"iv":             base64.StdEncoding.EncodeToString(iv),
+	}
+	for key, value := range extra {
+		item[key] = value
+	}
+	return marshalTestJSON(t, map[string]any{"item": item})
+}
+
+func marshalTestJSON(t *testing.T, value any) string {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal test JSON: %v", err)
+	}
+	return string(encoded)
 }

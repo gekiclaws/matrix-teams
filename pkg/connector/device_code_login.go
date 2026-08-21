@@ -106,7 +106,7 @@ func (l *DeviceCodeLogin) Wait(ctx context.Context) (*bridgev2.LoginStep, error)
 	}
 	teamsUserID := auth.NormalizeTeamsUserID(skypeID)
 	if teamsUserID == "" {
-		return nil, errors.New("Teams user ID missing from skypetoken response")
+		return nil, errors.New("teams user ID missing from skypetoken response")
 	}
 
 	// Graph is optional for core chat sync. Acquire it best-effort so attachment

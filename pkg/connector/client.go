@@ -28,6 +28,7 @@ type TeamsClient struct {
 
 	loggedIn atomic.Bool
 
+	authMu         sync.Mutex
 	consumerHTTPMu sync.Mutex
 	consumerHTTP   *http.Client
 

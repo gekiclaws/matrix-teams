@@ -5,14 +5,14 @@ import (
 	"errors"
 	"strings"
 	"time"
-
-	"go.mau.fi/mautrix-teams/internal/teams/auth"
 )
 
 func (c *TeamsClient) ensureValidGraphToken(ctx context.Context) error {
 	if c == nil || c.Meta == nil || c.Login == nil {
 		return errors.New("missing client/login metadata")
 	}
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
 	if c.Meta.GraphTokenValid(time.Now().UTC()) {
 		return nil
 	}
@@ -21,10 +21,7 @@ func (c *TeamsClient) ensureValidGraphToken(ctx context.Context) error {
 		return errors.New("missing refresh token for graph token refresh")
 	}
 
-	authClient := auth.NewClient(nil)
-	if c.Main != nil && strings.TrimSpace(c.Main.Config.ClientID) != "" {
-		authClient.ClientID = strings.TrimSpace(c.Main.Config.ClientID)
-	}
+	authClient := c.newRefreshAuthClient()
 
 	refreshed, err := refreshAccessTokenForGraphScope(ctx, authClient, refreshToken)
 	if err != nil {

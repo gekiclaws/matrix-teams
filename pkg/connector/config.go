@@ -10,8 +10,8 @@ import (
 var ExampleConfig string
 
 type TeamsConfig struct {
-	// OAuth client ID used by the Teams web app. This must match the ID used in MSAL localStorage keys.
-	// If unset, the connector uses the default client ID from internal/teams/auth.
+	// Legacy OAuth client ID fallback for logins created before OAuthClientID was
+	// persisted in per-login metadata. New device-code logins ignore this field.
 	ClientID string `yaml:"client_id"`
 }
 

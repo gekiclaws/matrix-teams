@@ -21,9 +21,9 @@ Teams-specific settings.
 
 - `client_id`
   Required: optional
-  Purpose: overrides the OAuth client ID used when extracting Teams MSAL localStorage and refreshing tokens.
-  Default behavior: if empty, the bridge uses the built-in Teams web app client ID.
-  Change this only when Teams login extraction breaks because Microsoft changed the web client ID.
+  Purpose: compatibility fallback for existing logins created before the issuing OAuth client ID was stored in per-login metadata.
+  Default behavior: if empty, those older logins use the built-in legacy client ID.
+  New device-code logins store and reuse the native Teams client ID, so this setting does not affect them.
 
 ### `bridge`
 
@@ -204,6 +204,7 @@ The bridge stores per-user Teams login state in the database, not in `config.yam
 Per-user login metadata includes:
 
 - refresh token
+- issuing OAuth client ID
 - Skype token
 - Graph access token
 - token expiry timestamps
@@ -213,7 +214,7 @@ Per-user login metadata includes:
 
 - Matrix appservice auth via `appservice.as_token` and `appservice.hs_token`
 - optional provisioning auth via `provisioning.shared_secret`
-- optional Teams OAuth client-ID override via `network.client_id`
+- optional legacy-login OAuth client-ID fallback via `network.client_id`
 
 ## Secret Handling Notes
 

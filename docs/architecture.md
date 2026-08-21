@@ -6,7 +6,7 @@
 
 The important design choices are:
 
-- Teams login state is captured from the Teams web app, not from a documented OAuth/device flow owned by this project.
+- New logins use Microsoft's device-code protocol with the native Teams public client.
 - Teams ingress is polling-based.
 - Attachments depend on delegated Microsoft Graph access.
 - The bridge keeps a small Teams-specific state layer on top of bridgev2's normal portal/message/reaction tables.
@@ -33,7 +33,7 @@ Component responsibilities:
   Owns login flow selection, token refresh hooks, Matrix event handlers, Teams polling, and message conversion.
 
 - `internal/teams/auth`
-  Extracts refresh/access tokens from Teams web MSAL localStorage, refreshes delegated tokens, and exchanges access tokens for Teams `skypetoken` values.
+  Runs device-code auth, refreshes delegated tokens, and exchanges access tokens for Teams `skypetoken` values.
 
 - `internal/teams/client`
   Wraps reverse-engineered Teams consumer HTTP APIs for conversations, messages, reactions, typing indicators, and consumption horizons.
@@ -61,24 +61,33 @@ There is no client-credentials flow in the current codebase.
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant W as Embedded Teams Webview
+    participant B as User Browser
     participant C as Connector
     participant A as Teams Auth Helpers
     participant T as Teams Token Endpoint
     participant S as Teams Skype Token API
 
-    U->>W: Sign in to teams.live.com
-    W->>C: Submit localStorage payload
-    C->>A: Extract MSAL refresh/access tokens
-    A->>T: Refresh delegated token if needed
-    A->>S: Exchange access token for skypetoken
+    C->>A: Start device-code login
+    A->>T: Request device code
+    T-->>A: User code and verification URL
+    A-->>C: User code and verification URL
+    C-->>U: Display verification URL and code
+    U->>B: Sign in and approve code
+    C->>A: Poll for completion
+    A->>T: Poll for native-client tokens
+    T-->>A: Device-flow access and refresh tokens
+    A-->>C: Device-flow access and refresh tokens
+    C->>A: Refresh for personal Teams MBI scope
+    A->>T: Exchange refresh token for MBI access token
+    T-->>A: MBI access token and rotated refresh token
+    A->>S: Exchange MBI access token for skypetoken
     C->>C: Persist refresh/skype/graph tokens in user_login metadata
 ```
 
 Notes:
 
-- The connector starts a login flow called `webview_localstorage`.
-- JavaScript in the webview waits for MSAL keys in localStorage and submits the full storage blob back to the bridge.
+- The connector login flow is `device_code`.
+- The issuing OAuth client ID is stored with each login so refresh requests keep using the correct public client.
 - The bridge tries to derive both:
   - a Teams chat token path (`skypetoken`)
   - a Graph token for file access

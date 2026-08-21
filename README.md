@@ -46,7 +46,7 @@ This is the shortest path to a first local run.
 Important setup notes:
 
 - the bridge generates an appservice registration file, but does not install it into your homeserver for you
-- outside Beeper, you need some `bridgev2`-compatible provisioning UI or custom integration for the Teams webview login flow
+- outside Beeper, you can use bridgev2's command login UI with the device-code flow
 - `config.example.yaml` is the recommended starting point for most setups
 
 ### Build
@@ -113,9 +113,9 @@ Expected first-run behavior:
 
 ### Complete A Teams Login
 
-The connector exposes a cookie/webview-based login flow named `teams.live.com (in-app browser)`.
+The connector exposes `Microsoft Teams device code` as its login flow. Open the Microsoft URL shown by the bridge, enter the displayed code, and approve the login. The bridge then completes the token exchange automatically.
 
-During login, the user signs into Teams in an embedded browser, the bridge extracts Teams web storage, derives the delegated token state it needs, and starts background sync for that account.
+Device-code login uses Microsoft's native Teams public client, avoiding the fixed 24-hour refresh-token family issued to the Teams Web SPA.
 
 ### Verify The Basics
 
@@ -158,13 +158,13 @@ flowchart LR
     B --> C["Teams connector"]
     C --> D["Teams consumer chat APIs"]
     C --> E["Microsoft Graph file APIs"]
-    F["Teams web login (teams.live.com)"] --> C
+    F["Teams device-code login"] --> C
 ```
 
 Main components:
 
 - `pkg/connector` for login orchestration, polling, Matrix event handling, and message conversion
-- `internal/teams/auth` for Teams web token extraction and refresh
+- `internal/teams/auth` for device-code auth, legacy Teams Web token extraction, and refresh
 - `internal/teams/client` for Teams chat API access
 - `internal/teams/graph` for file upload and download paths
 - `pkg/teamsdb` for Teams-specific cursor and profile state

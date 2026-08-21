@@ -11,7 +11,7 @@ For local debugging, stdout is usually enough. For recurring failures, the JSON 
 
 Useful log themes:
 
-- login extraction progress
+- device-code authorization progress
 - token refresh failures
 - Teams polling failures
 - Graph upload/download failures
@@ -33,18 +33,18 @@ Useful log themes:
 Symptoms:
 
 - the login flow sits waiting and never reaches a connected state
-- the bridge appears to be waiting for browser storage or cookie submission
+- the bridge appears to be waiting for device-code approval
 
 Likely causes:
 
-- your client or provisioning flow does not support the `bridgev2` cookie/webview login contract
-- Teams localStorage changed and the extractor no longer finds the MSAL keys it expects
+- the device code expired or was declined
+- the Microsoft account used in the browser is not the intended consumer Teams account
 
 What to check:
 
-- bridge logs for `Teams webview login still waiting for cookie submission`
-- bridge logs for `FI.MAU.TEAMS_INVALID_STORAGE`
-- whether your client can actually submit the webview localStorage payload expected by the bridge
+- whether the device-code URL was opened and approved before it expired
+- whether Microsoft displayed the final successful device-sign-in page
+- bridge logs for device polling, MBI refresh, or Skype-token exchange errors
 
 #### `bad_credentials` Immediately After Login
 
@@ -54,15 +54,13 @@ Symptoms:
 
 Likely causes:
 
-- refresh token extraction failed
-- the built-in Teams OAuth client ID no longer matches the current web app
+- the device-flow refresh token was not persisted or was revoked
 - Microsoft changed the Skype token exchange behavior
 
 Recovery:
 
-1. Re-run the login flow and inspect logs around token extraction.
-2. If Microsoft changed the Teams web client ID, set `network.client_id` explicitly.
-3. If the token exchange itself is failing, treat it as an upstream integration break rather than a config issue.
+1. Re-run the device-code login and inspect the token refresh and Skype-token exchange logs.
+2. If the token exchange itself is failing, treat it as an upstream integration break rather than a config issue.
 
 #### Matrix Side Never Connects
 
@@ -93,16 +91,14 @@ Symptoms:
 Likely causes:
 
 - Refresh token expired or became invalid
-- Teams web login extraction changed
-- `network.client_id` no longer matches the current Teams web app client ID
+- Microsoft revoked the device-code grant or changed token behavior
 
 Recovery:
 
 1. Re-run the user login flow.
-2. If extraction still fails, inspect login logs for MSAL/localStorage errors.
-3. If Microsoft changed the web client ID, set `network.client_id` explicitly.
-4. If only attachments fail, verify whether the problem is Graph-specific rather than full login breakage.
-5. Confirm the account works on `teams.live.com`, not only in an enterprise Teams tenant flow.
+2. Inspect logs for device polling, MBI refresh, and Skype-token exchange errors.
+3. If only attachments fail, verify whether the problem is Graph-specific rather than full login breakage.
+4. Confirm the account works on `teams.live.com`, not only in an enterprise Teams tenant flow.
 
 ### Teams API Breakage
 

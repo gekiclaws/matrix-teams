@@ -97,6 +97,8 @@ func (c *TeamsClient) ensureValidSkypeToken(ctx context.Context) error {
 	if c == nil || c.Login == nil {
 		return errors.New("missing client/login")
 	}
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
 	if c.Meta == nil {
 		if meta, ok := c.Login.Metadata.(*teamsid.UserLoginMetadata); ok {
 			c.Meta = meta
@@ -118,24 +120,28 @@ func (c *TeamsClient) ensureValidSkypeToken(ctx context.Context) error {
 		return errors.New("missing refresh token, re-login required")
 	}
 
-	authClient := auth.NewClient(nil)
-	if c.Main != nil && strings.TrimSpace(c.Main.Config.ClientID) != "" {
-		authClient.ClientID = strings.TrimSpace(c.Main.Config.ClientID)
-	}
+	authClient := c.newRefreshAuthClient()
 	// Keep this refresh scoped for skypetoken bootstrap. Graph token persistence
 	// is best-effort and should not affect skypetoken acquisition.
-	authClient.Scopes = []string{mbiRefreshScope, "offline_access"}
+	authClient.Scopes = c.skypeRefreshScopes()
 
 	state, err := authClient.RefreshAccessToken(ctx, refresh)
 	if err != nil {
 		return err
 	}
+	refreshRotated := false
 	if strings.TrimSpace(state.RefreshToken) != "" {
 		c.Meta.RefreshToken = strings.TrimSpace(state.RefreshToken)
+		refreshRotated = c.Meta.RefreshToken != refresh
 	}
 
 	skypeToken, skypeExpiresAt, skypeID, err := authClient.AcquireSkypeToken(ctx, state.AccessToken)
 	if err != nil {
+		if refreshRotated {
+			if saveErr := c.Login.Save(ctx); saveErr != nil {
+				c.Login.Log.Err(saveErr).Msg("Failed to persist rotated refresh token")
+			}
+		}
 		return err
 	}
 

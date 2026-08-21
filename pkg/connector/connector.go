@@ -63,13 +63,13 @@ func (t *TeamsConnector) LoadUserLogin(ctx context.Context, login *bridgev2.User
 }
 
 func (t *TeamsConnector) GetLoginFlows() []bridgev2.LoginFlow {
-	return []bridgev2.LoginFlow{loginFlowWebviewLocalStorage}
+	return []bridgev2.LoginFlow{loginFlowDeviceCode}
 }
 
 func (t *TeamsConnector) CreateLogin(ctx context.Context, user *bridgev2.User, flowID string) (bridgev2.LoginProcess, error) {
 	switch flowID {
-	case FlowIDWebviewLocalStorage:
-		return &WebviewLocalStorageLogin{
+	case FlowIDDeviceCode:
+		return &DeviceCodeLogin{
 			Main: t,
 			User: user,
 		}, nil

@@ -5,9 +5,8 @@
 # every framework-level option and default.
 
 network:
-  # Optional override for the Teams web app OAuth client ID used during
-  # localStorage extraction and refresh-token exchange.
-  # Leave empty unless the built-in default stops matching teams.live.com.
+  # Compatibility fallback for existing logins that predate per-login OAuth
+  # client metadata. New device-code logins ignore this setting.
   client_id: ""
 
 bridge:

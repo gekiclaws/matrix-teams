@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,22 +17,45 @@ const (
 	SkypeTokenExpirySkew        = 60 * time.Second
 )
 
-type skypeTokenResponse struct {
-	SkypeToken struct {
-		SkypeToken string `json:"skypetoken"`
-		ExpiresIn  int64  `json:"expiresIn"`
-		SkypeID    string `json:"skypeid"`
-		SignInName string `json:"signinname"`
-		IsBusiness bool   `json:"isBusinessTenant"`
-	} `json:"skypeToken"`
+type skypeTokenInner struct {
+	SkypeToken    string `json:"skypetoken"`
+	SkypeTokenAlt string `json:"skypeToken"`
+	ExpiresIn     int64  `json:"expiresIn"`
+	SkypeID       string `json:"skypeid"`
+	SignInName    string `json:"signinname"`
+	IsBusiness    bool   `json:"isBusinessTenant"`
 }
 
-func (c *Client) AcquireSkypeToken(ctx context.Context, accessToken string) (string, int64, string, error) {
+type skypeTokenRegionGtms struct {
+	ChatService    string `json:"chatService"`
+	ChatServiceAfd string `json:"chatServiceAfd"`
+	AMS            string `json:"ams"`
+	AMSV2          string `json:"amsV2"`
+}
+
+type skypeTokenResponse struct {
+	// Consumer responses use skypeToken. Enterprise responses use tokens and
+	// may spell the nested token field as skypeToken.
+	SkypeToken skypeTokenInner      `json:"skypeToken"`
+	Tokens     skypeTokenInner      `json:"tokens"`
+	RegionGtms skypeTokenRegionGtms `json:"regionGtms"`
+}
+
+type SkypeTokenResult struct {
+	Token          string
+	ExpiresAt      int64
+	SkypeID        string
+	IsBusiness     bool
+	ChatServiceURL string
+	AMSURL         string
+}
+
+func (c *Client) AcquireSkypeToken(ctx context.Context, accessToken string) (*SkypeTokenResult, error) {
 	if c.SkypeTokenEndpoint == "" {
-		return "", 0, "", errors.New("skype token endpoint not configured")
+		return nil, errors.New("skype token endpoint not configured")
 	}
 	if accessToken == "" {
-		return "", 0, "", errors.New("missing access token for skypetoken acquisition")
+		return nil, errors.New("missing access token for skypetoken acquisition")
 	}
 	if c.Log != nil {
 		c.Log.Info().Msg("Acquiring Teams skypetoken")
@@ -39,13 +63,13 @@ func (c *Client) AcquireSkypeToken(ctx context.Context, accessToken string) (str
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.SkypeTokenEndpoint, nil)
 	if err != nil {
-		return "", 0, "", err
+		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return "", 0, "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
@@ -58,26 +82,80 @@ func (c *Client) AcquireSkypeToken(ctx context.Context, accessToken string) (str
 			c.Log.Error().Int("status", resp.StatusCode).Str("body_snippet", snippet).Msg("Failed to acquire skypetoken")
 		}
 		if snippet == "" {
-			return "", 0, "", fmt.Errorf("skypetoken endpoint returned non-2xx status: %d", resp.StatusCode)
+			return nil, fmt.Errorf("skypetoken endpoint returned non-2xx status: %d", resp.StatusCode)
 		}
-		return "", 0, "", fmt.Errorf("skypetoken endpoint returned non-2xx status: %d body=%s", resp.StatusCode, snippet)
+		return nil, fmt.Errorf("skypetoken endpoint returned non-2xx status: %d body=%s", resp.StatusCode, snippet)
 	}
 
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return parseSkypeTokenResponse(body, time.Now().UTC())
+}
+
+func parseSkypeTokenResponse(body []byte, now time.Time) (*SkypeTokenResult, error) {
 	var payload skypeTokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", 0, "", err
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
 	}
-
-	token := payload.SkypeToken.SkypeToken
+	inner := payload.SkypeToken
+	if inner.SkypeToken == "" && inner.SkypeTokenAlt == "" {
+		inner = payload.Tokens
+	}
+	token := inner.SkypeToken
 	if token == "" {
-		return "", 0, "", errors.New("skypetoken response missing token")
+		token = inner.SkypeTokenAlt
+	}
+	if token == "" {
+		return nil, errors.New("skypetoken response missing token")
 	}
 
 	var expiresAt int64
-	if payload.SkypeToken.ExpiresIn > 0 {
-		expiresAt = time.Now().UTC().Add(time.Duration(payload.SkypeToken.ExpiresIn) * time.Second).Unix()
+	if inner.ExpiresIn > 0 {
+		expiresAt = now.UTC().Add(time.Duration(inner.ExpiresIn) * time.Second).Unix()
 	}
-	return token, expiresAt, payload.SkypeToken.SkypeID, nil
+	skypeID := strings.TrimSpace(inner.SkypeID)
+	if skypeID == "" {
+		skypeID = extractSkypeIDFromJWT(token)
+	}
+	chatServiceURL := firstNonEmptySkypeEndpoint(payload.RegionGtms.ChatService, payload.RegionGtms.ChatServiceAfd)
+	amsURL := firstNonEmptySkypeEndpoint(payload.RegionGtms.AMS, payload.RegionGtms.AMSV2)
+	return &SkypeTokenResult{
+		Token:          token,
+		ExpiresAt:      expiresAt,
+		SkypeID:        skypeID,
+		IsBusiness:     inner.IsBusiness || payload.Tokens.SkypeToken != "" || payload.Tokens.SkypeTokenAlt != "",
+		ChatServiceURL: chatServiceURL,
+		AMSURL:         amsURL,
+	}, nil
+}
+
+func extractSkypeIDFromJWT(token string) string {
+	parts := strings.SplitN(token, ".", 3)
+	if len(parts) < 2 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var claims struct {
+		SkypeID string `json:"skypeid"`
+	}
+	if json.Unmarshal(payload, &claims) != nil {
+		return ""
+	}
+	return strings.TrimSpace(claims.SkypeID)
+}
+
+func firstNonEmptySkypeEndpoint(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func (a *AuthState) HasValidSkypeToken(now time.Time) bool {

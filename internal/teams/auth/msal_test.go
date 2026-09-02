@@ -69,6 +69,38 @@ func TestSelectMBIAccessTokenMissing(t *testing.T) {
 	}
 }
 
+func TestExtractTokensUsesEnterpriseSkypeAPIAccessToken(t *testing.T) {
+	t.Parallel()
+	const clientID = "teams-web-client"
+	refreshKey := "refresh"
+	skypeKey := "skype"
+	storage := map[string]string{
+		"msal.token.keys." + clientID: `{"refreshToken":["` + refreshKey + `"],"accessToken":["` + skypeKey + `"]}`,
+		refreshKey:                    `{"secret":"refresh-token","expiresOn":"1700000000"}`,
+		skypeKey:                      `{"secret":"enterprise-access","expiresOn":"1700000300","target":"https://api.spaces.skype.com/.default"}`,
+	}
+
+	state, err := ExtractTokensFromMSALLocalStorage(mustJSON(t, storage), clientID)
+	if err != nil {
+		t.Fatalf("extract enterprise MSAL storage: %v", err)
+	}
+	if state.AccessToken != "enterprise-access" || state.ExpiresAtUnix != 1700000300 {
+		t.Fatalf("unexpected enterprise access token state: %+v", state)
+	}
+}
+
+func TestSelectSkypeAPIAccessTokenPrefersLatestExpiry(t *testing.T) {
+	storage := map[string]string{
+		"access1": `{"secret":"old","expiresOn":"1700000100","target":"https://api.spaces.skype.com/.default"}`,
+		"access2": `{"secret":"new","expiresOn":"1700000200","target":"https://API.SPACES.SKYPE.COM/.default"}`,
+		"access3": `{"secret":"graph","expiresOn":"1700000300","target":"https://graph.microsoft.com/User.Read"}`,
+	}
+	token, expiry := selectSkypeAPIAccessToken(storage, []string{"access1", "access2", "access3"}, "", nil)
+	if token != "new" || expiry != 1700000200 {
+		t.Fatalf("unexpected token=%q expiry=%d", token, expiry)
+	}
+}
+
 func TestExtractTokensFromEncryptedMSALStorage(t *testing.T) {
 	t.Parallel()
 	baseKey := randomBytes(t, 32)

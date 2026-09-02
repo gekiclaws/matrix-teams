@@ -1,3 +1,16 @@
 # Compatibility fallback for existing logins that predate per-login OAuth
 # client metadata. New device-code logins ignore this setting.
 client_id: ""
+
+# Advanced overrides for organizational Teams authentication. These settings
+# apply to legacy or externally provisioned logins. The built-in device-code
+# flow remains a personal Teams flow and keeps using its issuing endpoints.
+#
+# oauth_token_endpoint: "https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/token"
+# skype_token_endpoint: "https://teams.microsoft.com/api/authsvc/v1.0/authz"
+# oauth_redirect_uri: "https://teams.microsoft.com/go"
+# skype_refresh_scopes: "https://api.spaces.skype.com/.default offline_access"
+oauth_token_endpoint: ""
+skype_token_endpoint: ""
+oauth_redirect_uri: ""
+skype_refresh_scopes: ""

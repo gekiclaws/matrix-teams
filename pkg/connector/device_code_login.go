@@ -163,9 +163,9 @@ func acquirePersonalTeamsSkypeToken(ctx context.Context, client *auth.Client, re
 	if err != nil {
 		return nil, "", 0, "", fmt.Errorf("refresh personal Teams access token: %w", err)
 	}
-	skypeToken, skypeExpiresAt, skypeID, err := client.AcquireSkypeToken(ctx, state.AccessToken)
+	skype, err := client.AcquireSkypeToken(ctx, state.AccessToken)
 	if err != nil {
 		return nil, "", 0, "", fmt.Errorf("exchange personal Teams access token for skypetoken: %w", err)
 	}
-	return state, skypeToken, skypeExpiresAt, skypeID, nil
+	return state, skype.Token, skype.ExpiresAt, skype.SkypeID, nil
 }

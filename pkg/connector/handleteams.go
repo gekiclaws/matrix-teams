@@ -135,7 +135,7 @@ func (c *TeamsClient) ensureValidSkypeToken(ctx context.Context) error {
 		refreshRotated = c.Meta.RefreshToken != refresh
 	}
 
-	skypeToken, skypeExpiresAt, skypeID, err := authClient.AcquireSkypeToken(ctx, state.AccessToken)
+	skype, err := authClient.AcquireSkypeToken(ctx, state.AccessToken)
 	if err != nil {
 		if refreshRotated {
 			if saveErr := c.Login.Save(ctx); saveErr != nil {
@@ -146,15 +146,18 @@ func (c *TeamsClient) ensureValidSkypeToken(ctx context.Context) error {
 	}
 
 	c.Meta.AccessTokenExpiresAt = state.ExpiresAtUnix
-	c.Meta.SkypeToken = skypeToken
-	c.Meta.SkypeTokenExpiresAt = skypeExpiresAt
+	c.Meta.SkypeToken = skype.Token
+	c.Meta.SkypeTokenExpiresAt = skype.ExpiresAt
+	if strings.TrimSpace(skype.ChatServiceURL) != "" {
+		c.Meta.RegionChatServiceURL = strings.TrimSpace(skype.ChatServiceURL)
+	}
 	// Only overwrite Graph token fields if refresh response includes them. Do not
 	// wipe a stored valid Graph token when MBI refresh omits Graph tokens.
 	if strings.TrimSpace(state.GraphAccessToken) != "" && state.GraphExpiresAt != 0 {
 		c.Meta.GraphAccessToken = strings.TrimSpace(state.GraphAccessToken)
 		c.Meta.GraphExpiresAt = state.GraphExpiresAt
 	}
-	c.Meta.TeamsUserID = auth.NormalizeTeamsUserID(skypeID)
+	c.Meta.TeamsUserID = auth.NormalizeTeamsUserID(skype.SkypeID)
 	c.Login.RemoteName = c.Meta.TeamsUserID
 
 	if err := c.Login.Save(ctx); err != nil {

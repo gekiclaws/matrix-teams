@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -23,20 +24,20 @@ func TestAcquireSkypeTokenSuccess(t *testing.T) {
 	client.SkypeTokenEndpoint = server.URL
 
 	start := time.Now().UTC()
-	token, expiresAt, skypeID, err := client.AcquireSkypeToken(context.Background(), "msal")
+	result, err := client.AcquireSkypeToken(context.Background(), "msal")
 	if err != nil {
 		t.Fatalf("AcquireSkypeToken failed: %v", err)
 	}
-	if token != "jwt" {
-		t.Fatalf("unexpected token: %s", token)
+	if result.Token != "jwt" {
+		t.Fatalf("unexpected token: %s", result.Token)
 	}
-	if skypeID != "live:tester" {
-		t.Fatalf("unexpected skype id: %s", skypeID)
+	if result.SkypeID != "live:tester" {
+		t.Fatalf("unexpected skype id: %s", result.SkypeID)
 	}
 	minExpiry := start.Add(10 * time.Second).Unix()
 	maxExpiry := time.Now().UTC().Add(12 * time.Second).Unix()
-	if expiresAt < minExpiry || expiresAt > maxExpiry {
-		t.Fatalf("unexpected expiry: %d", expiresAt)
+	if result.ExpiresAt < minExpiry || result.ExpiresAt > maxExpiry {
+		t.Fatalf("unexpected expiry: %d", result.ExpiresAt)
 	}
 }
 
@@ -54,7 +55,7 @@ func TestAcquireSkypeTokenMissingToken(t *testing.T) {
 	client := NewClient(nil)
 	client.SkypeTokenEndpoint = server.URL
 
-	_, _, _, err := client.AcquireSkypeToken(context.Background(), "msal")
+	_, err := client.AcquireSkypeToken(context.Background(), "msal")
 	if err == nil {
 		t.Fatalf("expected error for missing token")
 	}
@@ -70,7 +71,7 @@ func TestAcquireSkypeTokenNon2xx(t *testing.T) {
 	client := NewClient(nil)
 	client.SkypeTokenEndpoint = server.URL
 
-	_, _, _, err := client.AcquireSkypeToken(context.Background(), "msal")
+	_, err := client.AcquireSkypeToken(context.Background(), "msal")
 	if err == nil {
 		t.Fatalf("expected error for non-2xx")
 	}
@@ -80,9 +81,31 @@ func TestAcquireSkypeTokenMissingAccessToken(t *testing.T) {
 	client := NewClient(nil)
 	client.SkypeTokenEndpoint = "https://example.invalid"
 
-	_, _, _, err := client.AcquireSkypeToken(context.Background(), "")
+	_, err := client.AcquireSkypeToken(context.Background(), "")
 	if err == nil {
 		t.Fatalf("expected error for missing access token")
+	}
+}
+
+func TestAcquireEnterpriseSkypeToken(t *testing.T) {
+	claims := base64.RawURLEncoding.EncodeToString([]byte(`{"skypeid":"8:orgid:tenant-user"}`))
+	jwt := "header." + claims + ".signature"
+	now := time.Unix(1_700_000_000, 0).UTC()
+	result, err := parseSkypeTokenResponse([]byte(`{"tokens":{"skypeToken":"`+jwt+`","expiresIn":600,"isBusinessTenant":true},"regionGtms":{"chatService":"https://amer.ng.msg.teams.microsoft.com","chatServiceAfd":"https://fallback.example","ams":"https://amer.ng.ams.teams.microsoft.com","amsV2":"https://fallback-ams.example"}}`), now)
+	if err != nil {
+		t.Fatalf("parse enterprise Skype token: %v", err)
+	}
+	if result.Token != jwt || result.SkypeID != "8:orgid:tenant-user" || !result.IsBusiness {
+		t.Fatalf("unexpected enterprise result: %+v", result)
+	}
+	if result.ChatServiceURL != "https://amer.ng.msg.teams.microsoft.com" {
+		t.Fatalf("unexpected chat service URL: %q", result.ChatServiceURL)
+	}
+	if result.AMSURL != "https://amer.ng.ams.teams.microsoft.com" {
+		t.Fatalf("unexpected AMS URL: %q", result.AMSURL)
+	}
+	if result.ExpiresAt != now.Add(10*time.Minute).Unix() {
+		t.Fatalf("unexpected expiry: %d", result.ExpiresAt)
 	}
 }
 

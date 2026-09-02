@@ -240,6 +240,14 @@ func (c *TeamsClient) newConsumer() *consumerclient.Client {
 	}
 	if c.Meta != nil {
 		consumer.Token = c.Meta.SkypeToken
+		if strings.TrimSpace(c.Meta.RegionChatServiceURL) != "" {
+			if err := consumer.ConfigureChatServiceURL(c.Meta.RegionChatServiceURL); err != nil {
+				if c.Login != nil {
+					c.Login.Log.Err(err).Msg("Invalid Teams regional chat service URL")
+				}
+				return nil
+			}
+		}
 	}
 	return consumer
 }

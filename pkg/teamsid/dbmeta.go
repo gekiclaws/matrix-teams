@@ -38,11 +38,12 @@ type UserLoginMetadata struct {
 	// Empty means the legacy Teams web SPA client for backwards compatibility.
 	OAuthClientID string `json:"oauth_client_id,omitempty"`
 
-	SkypeToken          string `json:"skype_token,omitempty"`
-	SkypeTokenExpiresAt int64  `json:"skype_token_expires_at,omitempty"`
-	GraphAccessToken    string `json:"graph_access_token,omitempty"`
-	GraphExpiresAt      int64  `json:"graph_expires_at,omitempty"`
-	TeamsUserID         string `json:"teams_user_id,omitempty"`
+	SkypeToken           string `json:"skype_token,omitempty"`
+	SkypeTokenExpiresAt  int64  `json:"skype_token_expires_at,omitempty"`
+	RegionChatServiceURL string `json:"region_chat_service_url,omitempty"`
+	GraphAccessToken     string `json:"graph_access_token,omitempty"`
+	GraphExpiresAt       int64  `json:"graph_expires_at,omitempty"`
+	TeamsUserID          string `json:"teams_user_id,omitempty"`
 }
 
 const graphTokenExpirySkew = 60 * time.Second

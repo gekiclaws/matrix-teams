@@ -90,6 +90,11 @@ func extractMSALTokens(storage map[string]string, clientID string) (*AuthState, 
 
 	if len(keys.AccessToken) > 0 {
 		accessToken, expiresAt := selectMBIAccessToken(storage, keys.AccessToken, clientID, cacheKey)
+		if accessToken == "" {
+			// Organizational Teams accounts use an OAuth token targeted at the
+			// Skype API rather than the consumer-only MBI scope.
+			accessToken, expiresAt = selectSkypeAPIAccessToken(storage, keys.AccessToken, clientID, cacheKey)
+		}
 		if accessToken != "" {
 			state.AccessToken = accessToken
 			if expiresAt != 0 {
@@ -142,6 +147,28 @@ func matchesMBITarget(target string) bool {
 	}
 	lower := strings.ToLower(target)
 	return strings.Contains(lower, mbiAccessTokenMarker)
+}
+
+const skypeAPIAccessTokenMarker = "api.spaces.skype.com"
+
+func selectSkypeAPIAccessToken(storage map[string]string, keys []string, clientID string, cacheKey *msalCacheEncryptionKey) (string, int64) {
+	var bestToken string
+	var bestExpiry int64
+	for _, key := range keys {
+		entry, err := readMSALEntry(storage, key, clientID, cacheKey)
+		if err != nil {
+			continue
+		}
+		if entry.Secret == "" || !strings.Contains(strings.ToLower(entry.Target), skypeAPIAccessTokenMarker) {
+			continue
+		}
+		expiry, _ := parseMSALExpires(entry.ExpiresOn)
+		if bestToken == "" || expiry > bestExpiry {
+			bestToken = entry.Secret
+			bestExpiry = expiry
+		}
+	}
+	return bestToken, bestExpiry
 }
 
 func selectGraphAccessToken(storage map[string]string, keys []string, clientID string, cacheKey *msalCacheEncryptionKey) (string, int64) {

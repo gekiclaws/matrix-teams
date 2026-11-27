@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	defaultConversationsURL = "https://teams.live.com/api/chatsvc/consumer/v1/users/ME/conversations"
+	defaultConversationsURL = "https://msgapi.teams.live.com/v1/users/ME/conversations?startTime=0&view=msnp24Equivalent&pageSize=200"
 	maxErrorBodyBytes       = 2048
 )
 

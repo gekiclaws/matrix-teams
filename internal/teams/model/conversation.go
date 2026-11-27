@@ -61,7 +61,7 @@ func (c RemoteConversation) Normalize() (Thread, bool) {
 }
 
 func (c RemoteConversation) NormalizeForSelf(selfUserID string) (Thread, bool) {
-	id := strings.TrimSpace(c.ThreadProperties.OriginalThreadID)
+	id := strings.TrimSpace(c.ThreadProperties.OriginalThreadID); if id == "" { id = strings.TrimSpace(c.ID) }
 	if id == "" {
 		return Thread{}, false
 	}

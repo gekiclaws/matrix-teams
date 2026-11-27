@@ -24,6 +24,9 @@ func (c *TeamsClient) sendAttachmentMessageWithClientMessageID(ctx context.Conte
 	if err := c.ensureValidSkypeToken(ctx); err != nil {
 		return "", err
 	}
+	if err := c.ensureValidGraphToken(ctx); err != nil {
+		return "", err
+	}
 	threadID = strings.TrimSpace(threadID)
 	if threadID == "" {
 		return "", errors.New("missing thread id")
